@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # 1. Relational Storage Database Engine
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: sentinel_postgres
+    environment:
+      # Compose reads these securely from your local .env file at runtime
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-stock_notifications}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel_admin} -d ${POSTGRES_DB:-stock_notifications}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. In-Memory Cache & Message Broker Lane
+  redis_broker:
+    image: redis:7-alpine
+    container_name: sentinel_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 3. FastAPI Core API Gateway Server Service
+  api:
+    build: .
+    container_name: sentinel_api
+    command: /bin/sh -c "chmod +x deploy-prod.sh && ./deploy-prod.sh"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/workspace
+    environment:
+      # Interpolating the internal docker network hostnames while keeping credentials hidden
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-sentinel_admin}:${POSTGRES_PASSWORD}@postgres_db:5432/${POSTGRES_DB:-stock_notifications}
+      - REDIS_URL=redis://redis_broker:6379/0
+      - API_SECRET_KEY=${API_SECRET_KEY}
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+
+  # 4. Asynchronous Background Task Worker Engine Pool
+  worker:
+    build: .
+    container_name: sentinel_worker
+    command: celery -A app.workers.tasks.celery_app worker --loglevel=info
+    volumes:
+      - .:/workspace
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-sentinel_admin}:${POSTGRES_PASSWORD}@postgres_db:5432/${POSTGRES_DB:-stock_notifications}
+      - REDIS_URL=redis://redis_broker:6379/0
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis_broker:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
