@@ -1,5 +1,7 @@
 import time
-from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -10,7 +12,36 @@ from app.services.rate_limiter import is_rate_limited
 from app.services.utils import sanitize_notification_body, safely_truncate_text
 from app.workers.tasks import send_background_notification
 
+from app.services.metrics import HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_SECONDS
+
 app = FastAPI(title=settings.APP_NAME, version="1.0.0")
+
+# 🚀 Prometheus Scraping Endpoint
+@app.get("/metrics")
+async def metrics():
+    """
+    Exposes application metrics to the Prometheus scraper cluster.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# 🚀 Middleware to automatically log latency and request counts
+@app.middleware("http")
+async def monitor_requests_middleware(request: Request, call_next):
+    start_time = time.time()
+    endpoint = request.url.path
+    method = request.method
+    
+    response = await call_next(request)
+    
+    # Calculate execution time delta
+    duration = time.time() - start_time
+    status_code = str(response.status_code)
+    
+    # Record metrics data points
+    HTTP_REQUESTS_TOTAL.labels(method=method, endpoint=endpoint, http_status=status_code).inc()
+    HTTP_REQUEST_DURATION_SECONDS.labels(method=method, endpoint=endpoint).observe(duration)
+    
+    return response
 
 # Mock database tracking token for local simulation testing
 # In full deployment, this would be a Redis ZSET lookup query.

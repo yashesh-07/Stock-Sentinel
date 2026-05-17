@@ -7,6 +7,8 @@ from app.config import settings
 from app.database import models
 from app.database.session import SessionLocal
 
+from app.services.metrics import NOTIFICATION_TASKS_TOTAL, NOTIFICATION_RETRY_TOTAL, ACTIVE_WORKER_TASKS
+
 # 1. Initialize Celery Application Instance connected to Redis
 celery_app = Celery(
     "notification_workers",
@@ -37,6 +39,9 @@ def send_background_notification(self, log_id: int):
     Picks up queued items, connects to network providers, and updates state history.
     """
     print(f"[WORKER] Activating transaction context lookup for Log Record: {log_id}")
+
+    # Increment our concurrent execution gauge
+    ACTIVE_WORKER_TASKS.inc()
     
     # Create an isolated database connection session for this independent thread loop
     db: Session = SessionLocal()
@@ -69,12 +74,17 @@ def send_background_notification(self, log_id: int):
         log_record.status = "SENT"
         log_record.sent_at = models.datetime.now(models.timezone.utc)
         db.commit()
+
+        # 🚀 Record Successful Telemetry
+        NOTIFICATION_TASKS_TOTAL.labels(channel=channel, status="SENT").inc()
+
         print(f"[WORKER][SUCCESS] Packet transmitted successfully for Log ID: {log_id}")
         return True
 
     except Exception as exc:
         # 4. Error Catching & Automatic Retry Loop Execution
         db.rollback() # Reset active session transactions safely
+        NOTIFICATION_RETRY_TOTAL.labels(channel=log_record.channel_type).inc()
         
         # Re-fetch the target log record using a clean context session frame
         log_record = db.query(models.NotificationLog).filter(models.NotificationLog.notification_id == log_id).first()
@@ -86,6 +96,8 @@ def send_background_notification(self, log_id: int):
             if self.request.retries >= self.max_retries:
                 # Max retry count exhausted completely - Mark as permanently unrecoverable
                 log_record.status = "FAILED"
+                # 🚀 Record Failed Telemetry
+                NOTIFICATION_TASKS_TOTAL.labels(channel=log_record.channel_type, status="FAILED").inc()
                 print(f"[WORKER][FATAL] Task execution failed completely after max retries for Log ID: {log_id}")
             else:
                 log_record.status = "RETRY_PENDING"
@@ -98,4 +110,6 @@ def send_background_notification(self, log_id: int):
         raise self.retry(exc=exc, countdown=retry_delay)
         
     finally:
+        # Decrement active gauge since processing ended
+        ACTIVE_WORKER_TASKS.dec()
         db.close() # Securely return database link resources back into the allocation pool

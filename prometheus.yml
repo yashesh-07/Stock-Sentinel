@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s # Poll metrics every 5 seconds
+
+scrape_configs:
+  - job_name: 'sentinel_api_gateway'
+    static_configs:
+      - targets: ['api:8000'] # Points directly to our FastAPI docker node
